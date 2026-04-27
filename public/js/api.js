@@ -140,6 +140,18 @@ const API = {
                 API.request('GET', `/proxy/xtream/${sourceId}/stream/${streamId}/${type}?container=${container}`)
         },
 
+        // M3U
+        m3u: {
+            get: (sourceId, options = {}) => {
+                const params = [];
+                if (options.includeHidden) params.push('includeHidden=true');
+                if (options.categoryId) params.push(`category_id=${options.categoryId}`);
+                if (options.groupsOnly) params.push('groups_only=true');
+                const query = params.length ? `?${params.join('&')}` : '';
+                return API.request('GET', `/proxy/m3u/${sourceId}${query}`);
+            }
+        },
+
         // EPG
         epg: {
             get: (sourceId) => API.request('GET', `/proxy/epg/${sourceId}`),
@@ -149,6 +161,14 @@ const API = {
         // Cache management
         cache: {
             clear: (sourceId) => API.request('DELETE', `/proxy/cache/${sourceId}`)
+        },
+
+        // Search
+        search: (query, sourceId = null, includeHidden = false) => {
+            let url = `/proxy/search?q=${encodeURIComponent(query)}`;
+            if (sourceId) url += `&sourceId=${sourceId}`;
+            if (includeHidden) url += `&includeHidden=true`;
+            return API.request('GET', url);
         }
     },
 

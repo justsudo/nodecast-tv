@@ -9,9 +9,11 @@ class LivePage {
     }
 
     async init() {
-        // Load sources and channels on initial page load
-        await this.app.channelList.loadSources();
-        await this.app.channelList.loadChannels();
+        // Only load if not already loaded (avoid duplicate loading on navigation)
+        if (this.app.channelList.channels.length === 0) {
+            await this.app.channelList.loadSources();
+            await this.app.channelList.loadChannels();
+        }
 
         // Silently fetch EPG data for sidebar info
         try {

@@ -207,9 +207,20 @@ app.listen(PORT, async () => {
     });
 
     // Trigger background sync with delay to allow server to settle
+    // Only sync if database is empty or outdated (handled by syncService)
     setTimeout(async () => {
-        await syncService.syncAll().catch(console.error);
-        // Start the server-side sync timer after initial sync
+        // Check if any sync is needed before doing a full sync
+        const db = require('./db/sqlite').getDb();
+        const hasData = db.prepare('SELECT 1 FROM playlist_items LIMIT 1').get();
+        
+        if (!hasData) {
+            console.log('[Server] Database is empty, triggering initial sync...');
+            await syncService.syncAll().catch(console.error);
+        } else {
+            console.log('[Server] Database has data, skipping startup sync.');
+        }
+
+        // Start the server-side sync timer after initial check
         await syncService.startSyncTimer().catch(console.error);
 
         // Detect hardware acceleration capabilities

@@ -8,7 +8,17 @@ class GuidePage {
     }
 
     async init() {
-        // EPG guide will lazy load when shown
+        console.log('[Guide] Initializing EPG page...');
+        
+        // Ensure channels are loaded if not already
+        if (!this.app.channelList.channels || this.app.channelList.channels.length === 0) {
+            await this.app.channelList.loadSources();
+            // We need channels for the EPG grid
+            await this.app.channelList.loadAllChannels();
+        }
+
+        // Load EPG data
+        await this.app.epgGuide.loadEpg();
     }
 
     async show() {

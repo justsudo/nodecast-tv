@@ -20,15 +20,16 @@ const DEFAULT_MAX_AGE_HOURS = 24;
 function getCategoriesFromDb(sourceId, type, includeHidden = false) {
     const db = getDb();
     let query = `
-        SELECT category_id, name as category_name, parent_id 
-        FROM categories 
-        WHERE source_id = ? AND type = ?
+        SELECT c.category_id, c.name as category_name, c.parent_id,
+        (SELECT COUNT(*) FROM playlist_items p WHERE p.source_id = c.source_id AND p.category_id = c.category_id AND p.type = c.type AND (p.is_hidden = 0 OR ?)) as item_count
+        FROM categories c
+        WHERE c.source_id = ? AND c.type = ?
     `;
     if (!includeHidden) {
-        query += ` AND is_hidden = 0`;
+        query += ` AND c.is_hidden = 0`;
     }
-    query += ` ORDER BY name ASC`;
-    const cats = db.prepare(query).all(sourceId, type);
+    query += ` ORDER BY c.name ASC`;
+    const cats = db.prepare(query).all(includeHidden ? 1 : 0, sourceId, type);
     return cats;
 }
 
@@ -78,6 +79,56 @@ function getStreamsFromDb(sourceId, type, categoryId = null, includeHidden = fal
 }
 
 
+// --- Search Channels --- //
+router.get('/search', async (req, res) => {
+    try {
+        const query = req.query.q;
+        const sourceId = req.query.sourceId ? parseInt(req.query.sourceId) : null;
+        const includeHidden = req.query.includeHidden === 'true';
+
+        if (!query || query.length < 2) {
+            return res.json([]);
+        }
+
+        const db = getDb();
+        let sql = `
+            SELECT p.*, c.name as category_name
+            FROM playlist_items p
+            LEFT JOIN categories c ON p.source_id = c.source_id AND p.category_id = c.category_id AND p.type = c.type
+            WHERE p.type = 'live' AND p.name LIKE ?
+        `;
+        const params = [`%${query}%`];
+
+        if (sourceId) {
+            sql += ' AND p.source_id = ?';
+            params.push(sourceId);
+        }
+
+        if (!includeHidden) {
+            sql += ' AND p.is_hidden = 0';
+        }
+
+        sql += ' LIMIT 100';
+
+        const channels = db.prepare(sql).all(...params);
+
+        const reformatted = channels.map(c => ({
+            ...c,
+            id: c.id,
+            streamId: c.item_id,
+            groupTitle: c.category_name || 'Uncategorized',
+            url: c.stream_url || c.url,
+            tvgLogo: c.stream_icon
+        }));
+
+        res.json(reformatted);
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ error: 'Search failed' });
+    }
+});
+
+
 // --- Xtream Codes Proxy API --- //
 
 // Login / Authenticate
@@ -106,7 +157,15 @@ router.get('/xtream/:sourceId/live_categories', async (req, res) => {
         const sourceId = parseInt(req.params.sourceId);
         const includeHidden = req.query.includeHidden === 'true';
         const cats = getCategoriesFromDb(sourceId, 'live', includeHidden);
-        res.json(cats);
+        
+        // Map fields for frontend compatibility
+        const formatted = cats.map(c => ({
+            ...c,
+            itemCount: c.item_count,
+            channelCount: c.item_count
+        }));
+        
+        res.json(formatted);
     } catch (err) {
         console.error(err);
         res.status(500).json({ error: 'Database error' });
@@ -275,18 +334,33 @@ router.get('/m3u/:sourceId', async (req, res) => {
     try {
         const sourceId = parseInt(req.params.sourceId);
         const includeHidden = req.query.includeHidden === 'true';
+        const categoryId = req.query.category_id; // Added support for category filtering
+
+        // If categoryId is NOT provided, return just the groups (and empty channels) to speed up initial load
+        if (!categoryId && req.query.groups_only === 'true') {
+            const groups = getCategoriesFromDb(sourceId, 'live', includeHidden);
+            const reformattedGroups = groups.map(g => ({
+                id: g.category_id,
+                name: g.category_name,
+                itemCount: g.item_count,
+                channelCount: g.item_count 
+            }));
+            return res.json({ channels: [], groups: reformattedGroups });
+        }
 
         // Fetch from DB
-        const channels = getStreamsFromDb(sourceId, 'live', null, includeHidden);
-        const groups = getCategoriesFromDb(sourceId, 'live', includeHidden);
-
-        // Format for frontend helper
-        // ChannelList expects:
-        // { 
-        //   channels: [ { id, name, groupTitle, url, tvgLogo, ... } ], 
-        //   groups: [ { id, name, channelCount } ] 
-        // }
-        // Note: DB `live` items from M3U sync have `category_id` as their group name usually.
+        const channels = getStreamsFromDb(sourceId, 'live', categoryId, includeHidden);
+        
+        // Only fetch groups if categoryId is NOT provided (initial load)
+        let reformattedGroups = [];
+        if (!categoryId) {
+            const groups = getCategoriesFromDb(sourceId, 'live', includeHidden);
+            reformattedGroups = groups.map(g => ({
+                id: g.category_id,
+                name: g.category_name,
+                channelCount: 0 
+            }));
+        }
 
         const reformattedChannels = channels.map(c => ({
             ...c,
@@ -295,16 +369,6 @@ router.get('/m3u/:sourceId', async (req, res) => {
             url: c.stream_url || c.url,
             tvgLogo: c.stream_icon
         }));
-
-        const reformattedGroups = groups.map(g => ({
-            id: g.category_id,
-            name: g.category_name,
-            channelCount: 0 // Frontend calculates this or we can
-        }));
-
-        // Add implicit groups check?
-        // The frontend M3U parser generates groups from the channels if explicit groups missing.
-        // Our SyncService `saveCategories` handles explicit groups.
 
         res.json({ channels: reformattedChannels, groups: reformattedGroups });
 

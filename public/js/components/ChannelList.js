@@ -292,31 +292,62 @@ class ChannelList {
     /**
      * Render channel list
      */
-    render() {
+    async render() {
         const searchTerm = this.searchInput.value.toLowerCase();
         const showHidden = this.showHiddenCheckbox ? this.showHiddenCheckbox.checked : false;
+
+        // Use a unique ID for this render pass to prevent race conditions from async search
+        const renderId = `render_${Date.now()}`;
+        this._lastRenderId = renderId;
+
+        // Filter and Group channels
+        const groupedChannels = {};
+
+        // 1. Filter
+        if (searchTerm) {
+            // If we have a searchTerm and we are in on-demand mode (channels not fully loaded),
+            // we should perform a server-side search
+            const sourceValue = this.sourceSelect.value;
+            const sourceId = sourceValue ? parseInt(sourceValue.split(':')[1]) : null;
+
+            // Only search if we don't have all channels in memory or if user is searching across all sources
+            if (!this._allChannelsLoaded && (searchTerm.length >= 2)) {
+                try {
+                    const results = await API.proxy.search(searchTerm, sourceId, showHidden);
+                    
+                    // If a newer render pass has started, abort this one
+                    if (this._lastRenderId !== renderId) return;
+
+                    // Use search results as the filtered list
+                    this.filteredChannels = results;
+                } catch (err) {
+                    console.error('Server search failed:', err);
+                    this.filteredChannels = [];
+                }
+            } else {
+                // Client-side filter (if channels are already in memory)
+                this.filteredChannels = (this.channels || []).filter(ch =>
+                    String(ch.name ?? "").toLowerCase().includes(searchTerm) ||
+                    String(ch.groupTitle ?? "").toLowerCase().includes(searchTerm)
+                );
+            }
+        } else {
+            this.filteredChannels = this.channels || [];
+        }
+
+        // Check again if we've been superseded
+        if (this._lastRenderId !== renderId) return;
 
         // Reset batching
         this.currentBatch = 0;
         this.batchSize = 100; // Number of groups to render per batch (increased to handle many hidden groups)
         this.container.innerHTML = ''; // Clear container
 
-        // Filter and Group channels
-        const groupedChannels = {};
-
-        // 1. Filter
-        this.filteredChannels = this.channels;
-        if (searchTerm) {
-            this.filteredChannels = this.channels.filter(ch =>
-                String(ch.name ?? "").toLowerCase().includes(searchTerm) ||
-                String(ch.groupTitle ?? "").toLowerCase().includes(searchTerm)
-            );
-        }
-
         let filteredChannels = this.filteredChannels;
 
         // 2. Group
-        filteredChannels.forEach(ch => {
+        const channelsToGroup = filteredChannels || [];
+        channelsToGroup.forEach(ch => {
             const groupKey = ch.groupTitle || 'Uncategorized';
             if (!groupedChannels[groupKey]) {
                 groupedChannels[groupKey] = [];
@@ -325,7 +356,7 @@ class ChannelList {
         });
 
         // 3. Add Favorites
-        const favoritedChannels = this.channels.filter(ch => this.isFavorite(ch.sourceId, ch.id));
+        const favoritedChannels = (this.channels || []).filter(ch => this.isFavorite(ch.sourceId, ch.id));
         if (favoritedChannels.length > 0) {
             favoritedChannels.sort((a, b) => a.name.localeCompare(b.name));
             groupedChannels['Favorites'] = favoritedChannels;
@@ -338,17 +369,27 @@ class ChannelList {
             return a.localeCompare(b);
         });
 
-        // Pre-filter to only include groups with visible channels (so hidden groups don't consume batch slots)
-        this.sortedGroups = allGroups.filter(groupName => {
-            if (groupName === 'Favorites') return true;
-            const channels = groupedChannels[groupName];
-            // Check if any channel in this group is visible
-            return channels.some(channel => {
-                const rawChannelId = channel.streamId || channel.id;
-                const isHidden = this.isHidden('channel', channel.sourceId, rawChannelId);
-                return !isHidden || showHidden;
+        // If we are in "Groups Only" mode (no search, no all-sources), 
+        // use the pre-loaded this.groups instead of deriving from channels
+        if (!searchTerm && this.sourceSelect.value) {
+            this.sortedGroups = ['Favorites', ...this.groups.map(g => g.name)].filter(name => {
+                if (name === 'Favorites') return (this.groupedChannels?.['Favorites']?.length || 0) > 0;
+                return true;
             });
-        });
+        } else {
+            // Pre-filter to only include groups with visible channels (so hidden groups don't consume batch slots)
+            this.sortedGroups = allGroups.filter(groupName => {
+                if (groupName === 'Favorites') return true;
+                const channels = groupedChannels[groupName];
+                if (!channels) return false;
+                // Check if any channel in this group is visible
+                return channels.some(channel => {
+                    const rawChannelId = channel.streamId || channel.id;
+                    const isHidden = this.isHidden('channel', channel.sourceId, rawChannelId);
+                    return !isHidden || showHidden;
+                });
+            });
+        }
 
         this.groupedChannels = groupedChannels;
         this.showHidden = showHidden;
@@ -369,6 +410,7 @@ class ChannelList {
         this.renderedChannels = [];
         this.sortedGroups.forEach(groupName => {
             const channels = this.groupedChannels[groupName];
+            if (!channels) return;
             const isFavoritesGroup = groupName === 'Favorites';
 
             const visibleChannels = channels.filter(channel => {
@@ -447,20 +489,21 @@ class ChannelList {
 
         for (const groupName of groupsToRender) {
             const channels = this.groupedChannels[groupName];
-            if (channels.length === 0) continue;
-
+            
             const isFavoritesGroup = groupName === 'Favorites';
 
             // Pre-filter visible channels for this group
-            const visibleChannels = channels.filter(channel => {
+            const visibleChannels = channels ? channels.filter(channel => {
                 if (isFavoritesGroup) return true;
                 const rawChannelId = channel.streamId || channel.id;
                 const channelHidden = this.isHidden('channel', channel.sourceId, rawChannelId);
                 return !channelHidden || this.showHidden;
-            });
+            }) : [];
 
             // Skip group if no visible channels (derived visibility)
-            if (visibleChannels.length === 0) continue;
+            // UNLESS we are in on-demand mode (channels not loaded yet)
+            const isOnDemand = !channels && !isFavoritesGroup;
+            if (visibleChannels.length === 0 && !isOnDemand) continue;
 
             // Default new groups to collapsed (except Favorites)
             // This handles groups loaded via scroll that weren't in the initial collapse
@@ -473,7 +516,7 @@ class ChannelList {
           <div class="group-header ${this.collapsedGroups.has(groupName) ? 'collapsed' : ''} ${isFavoritesGroup ? 'favorites-group' : ''}" data-group="${groupName}">
             <span class="group-toggle">${Icons.chevronDown}</span>
             <span class="group-name">${groupName}</span>
-            <span class="group-count">${visibleChannels.length}</span>
+            <span class="group-count">${channels ? visibleChannels.length : (this.groups.find(g => g.name === groupName)?.itemCount ?? '...')}</span>
           </div>
           <div class="group-channels">
       `;
@@ -585,11 +628,97 @@ class ChannelList {
     /**
      * Render channels for a specific group (called when expanding a collapsed group)
      */
-    renderGroupChannels(groupName, container) {
+    async renderGroupChannels(groupName, container) {
+        // If it's favorites, we always have them in memory
+        if (groupName === 'Favorites') {
+            this.renderGroupChannelsSync(groupName, container);
+            return;
+        }
+
+        const group = this.groups.find(g => g.name === groupName);
+        if (!group) return;
+
+        // Prevent concurrent loading for the same group
+        if (group._isLoading) return;
+
+        // Check if we already have channels for this group
+        let groupChannels = (this.channels || []).filter(c => c.groupTitle === groupName && c.sourceId === group.sourceId);
+
+        if (groupChannels.length === 0) {
+            group._isLoading = true;
+            container.innerHTML = '<div class="loading-small"></div>';
+            try {
+                let fetchedChannels = [];
+                if (group.sourceType === 'xtream') {
+                    fetchedChannels = await API.proxy.xtream.liveStreams(group.sourceId, group.rawId);
+                    // Map to internal format
+                    fetchedChannels = fetchedChannels.map(stream => ({
+                        id: `xtream_${group.sourceId}_${stream.stream_id}`,
+                        streamId: stream.stream_id,
+                        name: stream.name,
+                        tvgId: stream.epg_channel_id,
+                        tvgLogo: stream.stream_icon,
+                        groupId: group.id,
+                        groupTitle: group.name,
+                        sourceId: group.sourceId,
+                        sourceType: 'xtream'
+                    }));
+                } else if (group.sourceType === 'm3u') {
+                    const result = await API.proxy.m3u.get(group.sourceId, { categoryId: group.rawId });
+                    fetchedChannels = result.channels || [];
+                }
+
+                // Double check if channels were added by another call (just in case)
+                const alreadyExists = (this.channels || []).some(c => c.groupTitle === groupName && c.sourceId === group.sourceId);
+                if (!alreadyExists) {
+                    // Add to our main channels list
+                    this.channels = (this.channels || []).concat(fetchedChannels);
+                }
+                
+                groupChannels = fetchedChannels;
+
+                // Update groupedChannels map for this group
+                if (!this.groupedChannels) this.groupedChannels = {};
+                this.groupedChannels[groupName] = groupChannels;
+
+                // Re-calculate renderedChannels for this group if needed for navigation
+                this.updateRenderedChannels();
+            } catch (err) {
+                console.error('Error loading group channels:', err);
+                container.innerHTML = '<div class="error-small">Failed to load</div>';
+                return;
+            } finally {
+                group._isLoading = false;
+            }
+        }
+
+        this.renderGroupChannelsSync(groupName, container);
+    }
+
+    /**
+     * Sync version of group rendering (uses current memory)
+     */
+    renderGroupChannelsSync(groupName, container) {
         const channels = this.groupedChannels[groupName];
-        if (!channels || channels.length === 0) return;
+        if (!channels || channels.length === 0) {
+            container.innerHTML = '<div class="empty-state-small">No channels in this group</div>';
+            return;
+        }
 
         const isFavoritesGroup = groupName === 'Favorites';
+
+        // Update count in header if it was '...'
+        const groupEl = container.closest('.channel-group');
+        const countSpan = groupEl?.querySelector('.group-count');
+        if (countSpan && countSpan.textContent === '...') {
+            const visibleCount = channels.filter(channel => {
+                if (isFavoritesGroup) return true;
+                const rawChannelId = channel.streamId || channel.id;
+                const channelHidden = this.isHidden('channel', channel.sourceId, rawChannelId);
+                return !channelHidden || this.showHidden;
+            }).length;
+            countSpan.textContent = visibleCount;
+        }
 
         // Filter visible channels
         const visibleChannels = channels.filter(channel => {
@@ -606,12 +735,14 @@ class ChannelList {
             const isActive = this.currentChannel?.id === channel.id;
             const isFavorite = this.isFavorite(channel.sourceId, channel.id);
 
-            // Find the matching rendered channel to get its unique IDs
+            // Find or generate render ID
             const renderedChannel = this.renderedChannels.find(rc =>
-                rc.id === channel.id && rc.sourceId === channel.sourceId && rc._renderGroup === groupName
+                (rc.id === channel.id || rc.streamId === channel.streamId) && 
+                rc.sourceId === channel.sourceId && 
+                rc._renderGroup === groupName
             );
-            const renderId = renderedChannel?._renderId || '';
-            const renderGroup = renderedChannel?._renderGroup || groupName;
+            const renderId = renderedChannel?._renderId || `rid_${Math.random().toString(36).substr(2, 9)}`;
+            const renderGroup = groupName;
 
             html += `
           <div class="channel-item ${isActive ? 'active' : ''} ${channelHidden ? 'hidden' : ''}" 
@@ -656,6 +787,32 @@ class ChannelList {
     }
 
     /**
+     * Helper to update visual navigation map when new channels arrive
+     */
+    updateRenderedChannels() {
+        this.renderedChannels = [];
+        this.sortedGroups.forEach(groupName => {
+            const channels = this.groupedChannels[groupName] || [];
+            const isFavoritesGroup = groupName === 'Favorites';
+
+            const visibleChannels = channels.filter(channel => {
+                if (isFavoritesGroup) return true;
+                const rawChannelId = channel.streamId || channel.id;
+                const channelHidden = this.isHidden('channel', channel.sourceId, rawChannelId);
+                return !channelHidden || this.showHidden;
+            });
+
+            visibleChannels.forEach(ch => {
+                this.renderedChannels.push({
+                    ...ch,
+                    _renderId: ch._renderId || `rid_${Math.random().toString(36).substr(2, 9)}`,
+                    _renderGroup: groupName
+                });
+            });
+        });
+    }
+
+    /**
      * Load sources into dropdown
      */
     async loadSources() {
@@ -690,6 +847,14 @@ class ChannelList {
                 });
                 this.sourceSelect.appendChild(optgroup);
             }
+
+            // Auto-select first source if nothing is selected and sources exist
+            if (!this.sourceSelect.value && (xtreamSources.length > 0 || m3uSources.length > 0)) {
+                const firstSource = xtreamSources.length > 0 ? xtreamSources[0] : m3uSources[0];
+                const type = xtreamSources.length > 0 ? 'xtream' : 'm3u';
+                this.sourceSelect.value = `${type}:${firstSource.id}`;
+                console.log('[ChannelList] Auto-selected source:', this.sourceSelect.value);
+            }
         } catch (err) {
             console.error('Error loading sources:', err);
         }
@@ -704,10 +869,9 @@ class ChannelList {
         this.currentRenderId = null; // Reset render tracking
 
         const sourceValue = this.sourceSelect.value;
-        const self = this;
 
         if (!sourceValue) {
-            // Load from all sources
+            // Load from all sources (we'll keep this as-is for now, or we could also optimize it)
             await this.loadAllChannels();
             this.isLoading = false;
             return;
@@ -718,18 +882,43 @@ class ChannelList {
         try {
             this.container.innerHTML = '<div class="loading"></div>';
 
+            // Reset data
+            this.channels = [];
+            this.groups = [];
+            this.groupedChannels = {};
+            this._allChannelsLoaded = false;
+
             if (type === 'xtream') {
-                await this.loadXtreamChannels(parseInt(id));
+                // For Xtream, we only load categories initially
+                const categories = await API.proxy.xtream.liveCategories(parseInt(id));
+                this.groups = categories.map(cat => ({
+                    id: `xtream_${id}_${cat.category_id}`,
+                    rawId: cat.category_id,
+                    name: cat.category_name,
+                    itemCount: cat.itemCount || cat.channelCount || 0,
+                    sourceId: parseInt(id),
+                    sourceType: 'xtream'
+                }));
             } else if (type === 'm3u') {
-                await this.loadM3uChannels(parseInt(id));
+                // For M3U, we use our new groups-only mode
+                const result = await API.proxy.m3u.get(parseInt(id), { groupsOnly: true });
+                this.groups = (result.groups || []).map(g => ({
+                    id: `m3u_${id}_${g.id}`,
+                    rawId: g.id,
+                    name: g.name,
+                    itemCount: g.itemCount || g.channelCount || 0,
+                    sourceId: parseInt(id),
+                    sourceType: 'm3u'
+                }));
             }
 
             // Load hidden items and favorites
             await Promise.all([
-                this.loadHiddenItems(),
+                this.loadHiddenItems(id),
                 this.loadFavorites()
             ]);
 
+            // Add Favorites as a virtual group
             this.render();
         } catch (err) {
             console.error('Error loading channels:', err);
@@ -745,6 +934,8 @@ class ChannelList {
     async loadAllChannels() {
         this.channels = [];
         this.groups = [];
+        this.groupedChannels = {}; // Initialize to avoid undefined errors
+        this._allChannelsLoaded = false;
 
         try {
             this.container.innerHTML = '<div class="loading"></div>';
@@ -765,6 +956,8 @@ class ChannelList {
                 this.loadHiddenItems(),
                 this.loadFavorites()
             ]);
+            
+            this._allChannelsLoaded = true;
             this.render();
         } catch (err) {
             console.error('Error loading all channels:', err);
@@ -778,6 +971,7 @@ class ChannelList {
         if (!append) {
             this.channels = [];
             this.groups = [];
+            this._allChannelsLoaded = false;
         }
 
         const categories = await API.proxy.xtream.liveCategories(sourceId);
@@ -818,6 +1012,7 @@ class ChannelList {
         if (!append) {
             this.channels = [];
             this.groups = [];
+            this._allChannelsLoaded = false;
         }
 
         // Use Xtream API endpoints - backend now supports M3U sources too
@@ -854,9 +1049,9 @@ class ChannelList {
     /**
      * Load hidden items
      */
-    async loadHiddenItems() {
+    async loadHiddenItems(sourceId = null) {
         try {
-            const items = await API.channels.getHidden();
+            const items = await API.channels.getHidden(sourceId);
             this.hiddenItems = new Set(items.map(i => `${i.item_type}:${i.source_id}:${i.item_id}`));
         } catch (err) {
             console.error('Error loading hidden items:', err);

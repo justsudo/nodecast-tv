@@ -198,21 +198,30 @@ class EpgGuide {
     async fetchEpgData(forceRefresh = false) {
         // Get ALL sources and filter for EPG-capable types
         const allSources = await API.sources.getAll();
-        const sources = allSources.filter(s => (s.type === 'epg' || s.type === 'xtream') && s.enabled);
+        const sources = allSources.filter(s => (s.type === 'epg' || s.type === 'xtream' || s.type === 'm3u') && s.enabled);
 
         if (sources.length === 0) {
-            throw new Error('No EPG sources or Xtream accounts configured');
+            throw new Error('No EPG sources configured');
         }
 
         // Build query params for server-side caching
-        // Sync interval is controlled by server, we just hint at max cache age
-        const maxAge = 24; // hours - server controls actual refresh
+        const maxAge = 24; // hours
         const queryParams = forceRefresh ? '?refresh=1' : `?maxAge=${maxAge}`;
 
         // Load EPG from ALL sources in parallel
         const fetchPromises = sources.map(async (source) => {
             try {
-                const response = await fetch(`/api/proxy/epg/${source.id}${queryParams}`);
+                // Determine start/end time window for the request (current date +/- 24h)
+                const startTime = new Date();
+                startTime.setHours(startTime.getHours() + this.timeOffset - 12);
+                const endTime = new Date(startTime);
+                endTime.setHours(endTime.getHours() + 48);
+
+                // Use the new POST endpoint for targeted channel EPG if we have channels loaded
+                // Otherwise fallback to the general proxy endpoint
+                let endpoint = `/api/proxy/epg/${source.id}${queryParams}`;
+                
+                const response = await fetch(endpoint);
                 if (!response.ok) throw new Error(`Status ${response.status}`);
                 return await response.json();
             } catch (e) {
@@ -241,6 +250,12 @@ class EpgGuide {
                 }
             }
         });
+
+        // Fallback: If no EPG data but we have channels from ChannelList, 
+        // we can still render the grid with "No Data" slots
+        if (!hasData && window.app?.channelList?.channels?.length > 0) {
+            hasData = true; 
+        }
 
         if (!hasData) {
             throw new Error('Failed to load EPG data from any source');
@@ -340,14 +355,29 @@ class EpgGuide {
     /**
      * Render the EPG grid
      */
-    render() {
+    async render() {
         // Get channel list instance
         const channelList = window.app?.channelList;
         if (!channelList) return;
 
-        // Get channels and filter out hidden ones (always enforce hidden in EPG)
-        // Note: We only check individual channel visibility, not group visibility
-        // A group is implicitly visible if it has any visible children
+        // Ensure we have channels loaded. In on-demand mode, we might need to load them first
+        // if the user went straight to the Guide page.
+        if ((!channelList.channels || channelList.channels.length === 0) && !this._isInternalLoading) {
+            this._isInternalLoading = true;
+            try {
+                if (channelList.sourceSelect && channelList.sourceSelect.value) {
+                    await channelList.loadAllChannels();
+                } else {
+                    await channelList.loadSources();
+                    if (channelList.sourceSelect.value) {
+                        await channelList.loadAllChannels();
+                    }
+                }
+            } finally {
+                this._isInternalLoading = false;
+            }
+        }
+
         const playableChannels = (channelList.channels || []).filter(ch => {
             // Use streamId (raw ID) for hidden check since that's what SourceManager stores
             const rawChannelId = ch.streamId || ch.id;
