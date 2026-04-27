@@ -1,0 +1,28 @@
+# NodeCast TV - Linux build (no hardware acceleration)
+# Use this compose file if running on Linux without GPU acceleration
+#
+# Build: docker compose -f docker-compose.yml.light up --build
+# Run:   docker compose -f docker-compose.yml.light up
+
+services:
+  nodecast-tv:
+    build:
+      context: .
+      dockerfile: Dockerfile.light
+    container_name: nodecast-tv
+    ports:
+      - "3066:3000"
+    volumes:
+      - ./data:/app/data
+    restart: unless-stopped
+    environment:
+      - NODE_ENV=production
+      - PORT=3000
+    deploy:
+      resources:
+        limits:
+          cpus: '4'
+          memory: 4G
+        reservations:
+          cpus: '0.5'
+          memory: 512M

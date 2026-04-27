@@ -1,0 +1,37 @@
+# NodeCast TV Docker Image - Light/Generic Build
+# No hardware acceleration (VAAPI, NVENC, QSV)
+#
+# Build: docker compose -f docker-compose.yml.light build
+# Run:   docker compose -f docker-compose.yml.light up
+
+FROM node:lts-slim
+
+# Install Node.js and FFmpeg (minimal, no GPU drivers)
+ARG TARGETARCH
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
+
+# Verify FFmpeg installed
+RUN ffmpeg -version
+
+WORKDIR /app
+
+# Copy package files
+COPY package*.json ./
+
+# Install dependencies
+RUN npm ci --only=production
+
+# Copy application files
+COPY . .
+
+# Create data and cache directories
+RUN mkdir -p /app/data /app/transcode-cache && chmod 777 /app/transcode-cache
+
+# Expose port
+EXPOSE 3000
+
+# Start server
+CMD ["node", "server/index.js"]

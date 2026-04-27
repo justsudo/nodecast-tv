@@ -207,26 +207,27 @@ app.listen(PORT, async () => {
     });
 
     // Trigger background sync with delay to allow server to settle
-    // Only sync if database is empty or outdated (handled by syncService)
+    // Non-blocking: sync runs in background while server handles requests immediately
     setTimeout(async () => {
-        // Check if any sync is needed before doing a full sync
+        // Fast check if sync is needed (does not block)
         const db = require('./db/sqlite').getDb();
         const hasData = db.prepare('SELECT 1 FROM playlist_items LIMIT 1').get();
-        
+
         if (!hasData) {
-            console.log('[Server] Database is empty, triggering initial sync...');
-            await syncService.syncAll().catch(console.error);
+            console.log('[Server] Database is empty, triggering initial sync (non-blocking)...');
+            // Fire-and-forget: don't await, let it run in background
+            syncService.syncAll().catch(err => console.error('[Sync] Initial sync failed:', err));
         } else {
             console.log('[Server] Database has data, skipping startup sync.');
         }
 
-        // Start the server-side sync timer after initial check
-        await syncService.startSyncTimer().catch(console.error);
+        // Start sync timer immediately (does not wait for sync to complete)
+        syncService.startSyncTimer().catch(err => console.error('[Sync] Timer failed:', err));
 
-        // Detect hardware acceleration capabilities
+        // Detect hardware acceleration capabilities (non-blocking)
         try {
             const hwDetect = require('./services/hwDetect');
-            await hwDetect.detect();
+            hwDetect.detect().catch(err => console.warn('Hardware detection failed:', err.message));
         } catch (err) {
             console.warn('Hardware detection failed:', err.message);
         }
